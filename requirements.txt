@@ -6,5 +6,5 @@ python-multipart==0.0.20
 Pillow==12.0.0
 
 torch==2.5.1+cpu
-torchvision==0.20.1+cpu
+torchvision==0.22.1+cpu
 open-clip-torch==2.23.0
