@@ -5,9 +5,10 @@ uvicorn[standard]==0.38.0
 python-multipart==0.0.20
 Pillow==12.0.0
 
-torch==2.5.1
+torch==2.5.1+cpu
 open-clip-torch==3.2.0
-ftfy==6.3.1
-regex==2025.11.3
-timm==1.0.22
-tqdm==4.67.1
+
+ftfy
+regex
+timm
+tqdm
