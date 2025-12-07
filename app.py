@@ -19,8 +19,8 @@ device = "cpu"
 
 print("Loading small CLIP model...")
 model, preprocess, _ = open_clip.create_model_and_transforms(
-    "ViT-SO-32",
-    pretrained="laion2b_s34b_b79k"
+    "ViT-S-32",
+    pretrained="laion400m_e32"
 )
 model.eval()
 model.to(device)
@@ -49,7 +49,8 @@ def load_folder_embeddings(folder: str):
 
             tensors.append(emb)
 
-        except:
+        except Exception as e:
+            print("Error:", e)
             pass
 
     if not tensors:
@@ -69,7 +70,7 @@ for cat in categories:
     if emb is not None:
         class_embeddings[cat] = emb
 
-print("Reference loading:", list(class_embeddings.keys()))
+print("Reference loading complete:", class_embeddings.keys())
 
 MIN_VALID_SCORE = 74.0
 
@@ -86,7 +87,6 @@ def compute_scores(upload_emb):
 
     best_class, best_score = ordered[0]
     second_class, second_score = ordered[1]
-
     purity = round(best_score - second_score, 2)
 
     return scores, best_class, best_score, purity, ordered[1][0]
@@ -114,7 +114,6 @@ async def check_structure(file: UploadFile = File(...)):
             "confusion": confusion
         }
 
-    # Confidence levels
     if purity >= 3:
         confidence = "high"
     elif purity >= 1:
