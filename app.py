@@ -1,136 +1,124 @@
 import os
 import torch
-from io import BytesIO
+import open_clip
 from PIL import Image
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-import open_clip
+import numpy as np
+from typing import Dict
 
+# --------------------------------------------------
+# FASTAPI SETUP
+# --------------------------------------------------
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# --------------------------------------------------
+# DEVICE
+# --------------------------------------------------
 device = "cpu"
 
+# --------------------------------------------------
+# LOAD CLIP MODEL (smallest version available)
+# MobileCLIP-S1 uses tiny built-in weights
+# no pretrained tag -> minimal RAM
+# --------------------------------------------------
 print("Loading CLIP model...")
 model, preprocess, _ = open_clip.create_model_and_transforms(
-    "MobileCLIP2-S0",
-    pretrained="dfndr2b"
+    "MobileCLIP-S1"
 )
-model.eval()
-model.to(device)
+model.to(device).eval()
 print("Model loaded.")
 
-
-def load_folder_embeddings(folder: str):
-    if not os.path.exists(folder):
-        return None
-
-    tensors = []
-
-    for name in os.listdir(folder):
-        path = os.path.join(folder, name)
-
-        if not name.lower().endswith((".png", ".jpg", ".jpeg")):
-            continue
-
-        try:
-            img = Image.open(path).convert("RGB")
-            img_t = preprocess(img).unsqueeze(0)
-
-            with torch.no_grad():
-                emb = model.encode_image(img_t)
-                emb = emb / emb.norm(dim=-1, keepdim=True)
-
-            tensors.append(emb)
-        except:
-            pass
-
-    if not tensors:
-        return None
-
-    return torch.cat(tensors, dim=0)
-
-
-print("Loading reference datasets...")
-base = "reference/market_structure"
+# --------------------------------------------------
+# YOUR CATEGORIES
+# --------------------------------------------------
+base_folder = "reference/market_structure"
 categories = ["uptrend", "downtrend", "consolidation"]
-class_embeddings = {}
 
-for cat in categories:
-    folder = os.path.join(base, cat)
-    emb = load_folder_embeddings(folder)
-    if emb is not None:
-        class_embeddings[cat] = emb
+# Lazy-loaded embeddings (loads on first request)
+class_embeddings: Dict[str, torch.Tensor] = {
+    c: None for c in categories
+}
 
-print("Loaded embeddings:", list(class_embeddings.keys()))
+# --------------------------------------------------
+# UTILS
+# --------------------------------------------------
+def embed_image(img: Image.Image) -> torch.Tensor:
+    """Encode image using the CLIP model."""
+    image = preprocess(img).unsqueeze(0).to(device)
+    with torch.no_grad():
+        emb = model.encode_image(image)
+        emb = emb / emb.norm(dim=-1, keepdim=True)
+    return emb.cpu()
 
-MIN_VALID_SCORE = 74.0
+def cosine_similarity(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Compute cosine similarity."""
+    return (a @ b.T).squeeze(0)
 
+def load_folder_embeddings(folder_path: str) -> torch.Tensor:
+    """Load all images in a folder and compute embeddings."""
+    embs = []
+    for fname in os.listdir(folder_path):
+        if fname.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+            img = Image.open(os.path.join(folder_path, fname)).convert("RGB")
+            embs.append(embed_image(img))
+    if not embs:
+        return None
+    return torch.stack(embs)
 
-def compute_scores(upload_emb):
-    upload_emb = upload_emb / upload_emb.norm(dim=-1, keepdim=True)
+# --------------------------------------------------
+# PRELOAD ON FIRST REQUEST
+# --------------------------------------------------
+def ensure_embeddings_loaded():
+    """Load embeddings only when needed."""
+    for cat in categories:
+        if class_embeddings[cat] is None:
+            folder = os.path.join(base_folder, cat)
+            class_embeddings[cat] = load_folder_embeddings(folder)
 
-    scores = {}
-    for cat, emb in class_embeddings.items():
-        score = (emb @ upload_emb.T).max().item()
-        scores[cat] = round(score * 100, 2)
-
-    ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-
-    best_class, best_score = ordered[0]
-    second_class, second_score = ordered[1]
-    purity = round(best_score - second_score, 2)
-
-    return scores, best_class, best_score, purity, ordered[1][0]
-
+# --------------------------------------------------
+# API ENDPOINTS
+# --------------------------------------------------
+@app.get("/")
+def health():
+    return {"status": "ok"}
 
 @app.post("/check_structure")
 async def check_structure(file: UploadFile = File(...)):
-    data = await file.read()
-    img = Image.open(BytesIO(data)).convert("RGB")
-    img_t = preprocess(img).unsqueeze(0)
+    ensure_embeddings_loaded()
 
-    with torch.no_grad():
-        emb = model.encode_image(img_t)
+    # read image
+    contents = await file.read()
+    img = Image.open(
+        io.BytesIO(contents)
+    ).convert("RGB")
 
-    scores, best, best_score, purity, confusion = compute_scores(emb)
+    # embed upload
+    query_emb = embed_image(img)
 
-    if best_score < MIN_VALID_SCORE:
-        return {
-            "valid_chart": False,
-            "reason": "Low similarity to known patterns",
-            "scores": scores,
-            "best": best,
-            "best_score": best_score,
-            "purity": purity,
-            "confusion": confusion
-        }
+    # similarity
+    scores = {}
+    for cat in categories:
+        ref_embs = class_embeddings[cat]
+        if ref_embs is None:
+            scores[cat] = 0.0
+        else:
+            sims = cosine_similarity(query_emb, ref_embs)
+            scores[cat] = float(torch.max(sims).item())
 
-    if purity >= 3:
-        confidence = "high"
-    elif purity >= 1:
-        confidence = "medium"
-    else:
-        confidence = "low"
+    # pick best
+    best_cat = max(scores, key=scores.get)
+    best_score = scores[best_cat]
 
     return {
-        "valid_chart": True,
-        "chart_type": best,
-        "confidence": confidence,
-        "scores": scores,
-        "best": best,
-        "best_score": best_score,
-        "purity": purity,
-        "confusion": confusion
+        "structure": best_cat,
+        "score": best_score,
+        "details": scores
     }
-
-
-@app.get("/")
-def home():
-    return {"status": "ok"}
