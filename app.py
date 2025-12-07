@@ -20,7 +20,7 @@ device = "cpu"
 print("Loading CLIP model...")
 model, preprocess, _ = open_clip.create_model_and_transforms(
     "MobileCLIP2-S0",
-    pretrained="openai"
+    pretrained="dfndr2b"
 )
 model.eval()
 model.to(device)
@@ -48,8 +48,9 @@ def load_folder_embeddings(folder: str):
                 emb = emb / emb.norm(dim=-1, keepdim=True)
 
             tensors.append(emb)
+
         except Exception as e:
-            print("Error processing:", e)
+            print("Error:", e)
 
     if not tensors:
         return None
@@ -85,7 +86,6 @@ def compute_scores(upload_emb):
 
     best_class, best_score = ordered[0]
     second_class, second_score = ordered[1]
-
     purity = round(best_score - second_score, 2)
 
     return scores, best_class, best_score, purity, ordered[1][0]
@@ -127,10 +127,3 @@ async def check_structure(file: UploadFile = File(...)):
         "scores": scores,
         "%": best_score,
         "purity": purity,
-        "confusion": confusion
-    }
-
-
-@app.get("/")
-def home():
-    return {"status": "ok"}
