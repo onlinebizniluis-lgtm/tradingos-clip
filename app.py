@@ -48,9 +48,8 @@ def load_folder_embeddings(folder: str):
                 emb = emb / emb.norm(dim=-1, keepdim=True)
 
             tensors.append(emb)
-
-        except Exception as e:
-            print("Error:", e)
+        except:
+            pass
 
     if not tensors:
         return None
@@ -69,7 +68,7 @@ for cat in categories:
     if emb is not None:
         class_embeddings[cat] = emb
 
-print("Loaded embeddings for:", list(class_embeddings.keys()))
+print("Loaded embeddings:", list(class_embeddings.keys()))
 
 MIN_VALID_SCORE = 74.0
 
@@ -105,7 +104,7 @@ async def check_structure(file: UploadFile = File(...)):
     if best_score < MIN_VALID_SCORE:
         return {
             "valid_chart": False,
-            "reason": "Low similarity",
+            "reason": "Low similarity to known patterns",
             "scores": scores,
             "best": best,
             "best_score": best_score,
@@ -125,5 +124,13 @@ async def check_structure(file: UploadFile = File(...)):
         "chart_type": best,
         "confidence": confidence,
         "scores": scores,
-        "%": best_score,
+        "best": best,
+        "best_score": best_score,
         "purity": purity,
+        "confusion": confusion
+    }
+
+
+@app.get("/")
+def home():
+    return {"status": "ok"}
