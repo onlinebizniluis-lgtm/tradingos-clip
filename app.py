@@ -1,102 +1,105 @@
 import os
-import io
+import glob
 import numpy as np
 from PIL import Image
+from fastapi import FastAPI, UploadFile, File
 import onnxruntime as ort
-from fastapi import FastAPI, File, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
+from typing import Dict
 
-# -----------------------------
-# FastAPI
-# -----------------------------
 app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # -----------------------------
-# Model Setup (ONNX Runtime)
+# CONFIG
 # -----------------------------
-print("Loading ONNX CLIP model...")
-session = ort.InferenceSession(
-    "model/model.onnx",
-    providers=["CPUExecutionProvider"]
-)
-print("Model loaded.")
+REFERENCE_DIR = "reference/market_structure"
+MODEL_PATH = "model/mobileclip_s0.onnx"
 
 # -----------------------------
-# Categories
+# LOAD MODEL
 # -----------------------------
-categories = ["uptrend", "downtrend", "consolidation"]
-base_folder = "reference/market_structure"
-class_embeddings = {c: None for c in categories}
+print("Loading MobileCLIP-S0 ONNX model...")
+providers = ["CPUExecutionProvider"]
+session = ort.InferenceSession(MODEL_PATH, providers=providers)
+
+input_name = session.get_inputs()[0].name
+output_name = session.get_outputs()[0].name
 
 # -----------------------------
-# Helpers
+# IMAGE TO EMBEDDING
 # -----------------------------
+def load_image(path: str):
+    img = Image.open(path).convert("RGB").resize((224, 224))
+    return np.array(img).astype(np.float32) / 255.0
+
 def preprocess(img: Image.Image):
-    img = img.resize((224, 224))
-    arr = np.array(img).astype("float32") / 255.0
-    arr = (arr - 0.5) / 0.5
-    arr = np.transpose(arr, (2, 0, 1))
-    return np.expand_dims(arr, 0)
+    img = img.convert("RGB").resize((224, 224))
+    arr = np.array(img).astype(np.float32) / 255.0
+    arr = np.transpose(arr, (2, 0, 1))  # CHW
+    arr = np.expand_dims(arr, 0)
+    return arr
 
-def embed_image(img: Image.Image):
-    x = preprocess(img)
-    emb = session.run(None, {"image": x})[0]
-    emb /= np.linalg.norm(emb, axis=-1, keepdims=True)
-    return emb
+def embed(arr: np.ndarray):
+    out = session.run([output_name], {input_name: arr})
+    vec = out[0][0]
+    # Normalize
+    return vec / np.linalg.norm(vec)
 
-def load_folder_embeddings(path: str):
-    embs = []
-    for f in os.listdir(path):
-        if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-            img = Image.open(os.path.join(path, f)).convert("RGB")
-            embs.append(embed_image(img))
-    if not embs:
-        return None
-    return np.vstack(embs)
+# -----------------------------
+# LOAD REFERENCE DATABASE
+# -----------------------------
+print("Indexing reference images...")
+reference_db = []
 
-def ensure_loaded():
-    for c in categories:
-        if class_embeddings[c] is None:
-            folder = os.path.join(base_folder, c)
-            class_embeddings[c] = load_folder_embeddings(folder)
+for class_name in ["uptrend", "downtrend", "consolidation"]:
+    folder = os.path.join(REFERENCE_DIR, class_name)
+    files = glob.glob(os.path.join(folder, "*.png"))
 
+    for fpath in files:
+        img = Image.open(fpath)
+        arr = preprocess(img)
+        emb = embed(arr)
+        reference_db.append({
+            "class": class_name,
+            "file": os.path.basename(fpath),
+            "embedding": emb
+        })
+
+print(f"Loaded {len(reference_db)} reference examples.")
+
+# -----------------------------
+# COSINE SIMILARITY
+# -----------------------------
 def cosine(a, b):
-    return np.dot(b, a.T).flatten()
+    return float(np.dot(a, b))
 
 # -----------------------------
-# Routes
+# API ROUTE
 # -----------------------------
+@app.post("/predict")
+async def predict_image(file: UploadFile = File(...)) -> Dict:
+    img = Image.open(file.file)
+    arr = preprocess(img)
+    emb = embed(arr)
+
+    # Score against DB
+    scores = []
+    for ref in reference_db:
+        score = cosine(emb, ref["embedding"])
+        scores.append((score, ref["class"], ref["file"]))
+
+    scores.sort(reverse=True, key=lambda x: x[0])
+    best = scores[0]
+    second = scores[1]
+
+    confidence = best[0] - second[0]
+
+    return {
+        "pattern": best[1],
+        "example": best[2],
+        "score": best[0],
+        "confidence": round(confidence, 4)
+    }
+
 @app.get("/")
 def health():
     return {"status": "ok"}
-
-@app.post("/check_structure")
-async def check_structure(file: UploadFile = File(...)):
-    ensure_loaded()
-
-    data = await file.read()
-    img = Image.open(io.BytesIO(data)).convert("RGB")
-
-    query = embed_image(img)
-
-    scores = {}
-    for c in categories:
-        ref = class_embeddings[c]
-        if ref is None:
-            scores[c] = 0.0
-        else:
-            sims = cosine(query, ref)
-            scores[c] = float(np.max(sims))
-
-    best = max(scores, key=scores.get)
-    return {
-        "structure": best,
-        "score": scores[best],
-        "details": scores
-    }
