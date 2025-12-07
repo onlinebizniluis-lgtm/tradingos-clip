@@ -6,9 +6,9 @@ python-multipart==0.0.20
 Pillow==12.0.0
 
 torch==2.5.1+cpu
-open-clip-torch==2.23.2
+open-clip-torch==2.23.0
 
-ftfy
 regex
 timm
+ftfy
 tqdm
