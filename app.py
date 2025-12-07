@@ -1,5 +1,6 @@
 import os
 os.environ["OPENCLIP_DISABLE_COCA"] = "1"
+os.environ["OPENCLIP_SKIP_CUDA_CHECK"] = "1"
 
 import io
 import torch
@@ -8,9 +9,7 @@ from PIL import Image
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-# -----------------------------------
-# App setup
-# -----------------------------------
+
 app = FastAPI()
 
 app.add_middleware(
@@ -21,9 +20,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------------------
-# Load CLIP
-# -----------------------------------
 device = "cpu"
 
 model, preprocess, _ = open_clip.create_model_and_transforms(
@@ -34,9 +30,6 @@ model = model.to(device)
 tokenizer = open_clip.get_tokenizer("ViT-B-32")
 
 
-# -----------------------------------
-# Inference: similarity to chart concepts
-# -----------------------------------
 concepts = [
     "financial chart",
     "candlestick chart",
@@ -44,14 +37,15 @@ concepts = [
     "stock chart",
     "random unrelated photo"
 ]
+
 text_tokens = tokenizer(concepts)
 
 
-def get_scores(image: Image.Image):
+def get_scores(image):
     image_input = preprocess(image).unsqueeze(0).to(device)
     text_input = text_tokens.to(device)
 
-    with torch.no_grad(), torch.cuda.amp.autocast(enabled=False):
+    with torch.no_grad():
         image_features = model.encode_image(image_input)
         text_features = model.encode_text(text_input)
 
@@ -61,18 +55,12 @@ def get_scores(image: Image.Image):
         logits = (image_features @ text_features.T) * 100
         probs = logits.softmax(dim=-1).cpu().numpy()[0]
 
-    result = {}
-    for label, p in zip(concepts, probs):
-        result[label] = float(p)
-    return result
+    return {label: float(p) for label, p in zip(concepts, probs)}
 
 
-# -----------------------------------
-# Routes
-# -----------------------------------
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "CLIP engine ready"}
+    return {"status": "ok"}
 
 
 @app.post("/analyze")
@@ -82,7 +70,6 @@ async def analyze(file: UploadFile = File(...)):
 
     scores = get_scores(image)
 
-    # probability it's a chart
     chart_score = (
         scores["financial chart"]
         + scores["candlestick chart"]
@@ -90,15 +77,11 @@ async def analyze(file: UploadFile = File(...)):
         + scores["price action"]
     )
 
-    # random photo detection
     random_score = scores["random unrelated photo"]
-
-    # final logic
-    is_chart = chart_score > random_score
 
     return {
         "scores": scores,
-        "is_valid_chart": bool(is_chart),
+        "is_valid_chart": bool(chart_score > random_score),
         "chart_confidence": float(chart_score),
         "random_confidence": float(random_score),
     }
