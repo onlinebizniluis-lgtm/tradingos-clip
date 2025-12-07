@@ -1,8 +1,6 @@
-fastapi==0.124.0
-uvicorn[standard]==0.38.0
-python-multipart==0.0.20
-Pillow==12.0.0
-
-torch==2.7.1+cpu
-torchvision==0.22.1+cpu
-open-clip-torch==2.23.0
+fastapi
+uvicorn[standard]
+torch==2.9.1+cpu
+pillow
+python-multipart
+open-clip-torch
