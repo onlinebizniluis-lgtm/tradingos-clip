@@ -18,29 +18,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# Reduce memory use on Render
+torch.set_num_threads(1)
+device = "cpu"
 
 
 # ------------------------------------------------------------
-# Load CLIP: RN50 (low memory)
+# Load CLIP Model (cached)
 # ------------------------------------------------------------
 
-print("Loading CLIP RN50 model...")
+print("Loading CLIP...")
 model, preprocess, _ = open_clip.create_model_and_transforms(
-    "RN50",
-    pretrained="openai"
+    "ViT-B-32",
+    pretrained="openai",
+    cache_dir="/opt/render/cache"
 )
 model = model.to(device).eval()
-
-# put model in half precision for memory saving
-if device == "cuda":
-    model = model.half()
-
-print("Model loaded.")
+print("CLIP loaded.")
 
 
 # ------------------------------------------------------------
-# Load embeddings from folders
+# Load reference embeddings
 # ------------------------------------------------------------
 
 def load_folder_embeddings(folder):
@@ -54,12 +52,7 @@ def load_folder_embeddings(folder):
 
         try:
             img = Image.open(path).convert("RGB")
-            img_t = preprocess(img).unsqueeze(0)
-
-            if device == "cuda":
-                img_t = img_t.to(device).half()
-            else:
-                img_t = img_t.to(device)
+            img_t = preprocess(img).unsqueeze(0).to(device)
 
             with torch.no_grad():
                 emb = model.encode_image(img_t)
@@ -131,14 +124,10 @@ def compute_scores(upload_emb):
 @app.post("/check_structure")
 async def check_structure(file: UploadFile = File(...)):
     img = Image.open(file.file).convert("RGB")
-
-    img_t = preprocess(img).unsqueeze(0)
-    if device == "cuda":
-        img_t = img_t.to(device).half()
-    else:
-        img_t = img_t.to(device)
+    img_t = preprocess(img).unsqueeze(0).to(device)
 
     with torch.no_grad():
         emb = model.encode_image(img_t)
 
     return compute_scores(emb)
+
