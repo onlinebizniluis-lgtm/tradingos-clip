@@ -16,7 +16,7 @@ app.add_middleware(
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-
+# Load CLIP Model
 print("Loading CLIP model...")
 model, preprocess, _ = open_clip.create_model_and_transforms(
     "ViT-B-32",
@@ -26,36 +26,42 @@ model = model.to(device).eval()
 print("Model loaded.")
 
 
-def load_folder_embeddings(folder):
-    tensors = []
+def load_folder_embeddings(folder: str):
+        if not os.path.exists(folder):
+            print(f"Warning: folder not found → {folder}")
+            return None
 
-    for name in os.listdir(folder):
-        path = os.path.join(folder, name)
+        tensors = []
 
-        if not path.lower().endswith((".png", ".jpg", ".jpeg")):
-            continue
+        for name in os.listdir(folder):
+            path = os.path.join(folder, name)
 
-        try:
-            img = Image.open(path).convert("RGB")
-            img_t = preprocess(img).unsqueeze(0).to(device)
+            if not path.lower().endswith((".png", ".jpg", ".jpeg")):
+                continue
 
-            with torch.no_grad():
-                emb = model.encode_image(img_t)
-                emb /= emb.norm(dim=-1, keepdim=True)
+            try:
+                img = Image.open(path).convert("RGB")
+                img_t = preprocess(img).unsqueeze(0).to(device)
 
-            tensors.append(emb)
+                with torch.no_grad():
+                    emb = model.encode_image(img_t)
+                    emb = emb / emb.norm(dim=-1, keepdim=True)
 
-        except:
-            pass
+                tensors.append(emb)
 
-    if not tensors:
-        return None
+            except Exception as e:
+                print(f"Error loading {path}: {e}")
+                pass
 
-    return torch.cat(tensors, dim=0)
+        if not tensors:
+            print(f"No images in {folder}")
+            return None
+
+        return torch.cat(tensors, dim=0)
 
 
+# Load Reference Data
 print("Loading reference datasets...")
-
 base = "reference/market_structure"
 categories = ["uptrend", "downtrend", "consolidation"]
 class_embeddings = {}
@@ -66,14 +72,13 @@ for cat in categories:
     if emb is not None:
         class_embeddings[cat] = emb
 
-print("Reference loading complete.")
+print("Reference loading complete:", list(class_embeddings.keys()))
 
-
-MIN_VALID_SCORE = 74.0  # derived from your dataset
+MIN_VALID_SCORE = 74.0
 
 
 def compute_scores(upload_emb):
-    upload_emb /= upload_emb.norm(dim=-1, keepdim=True)
+    upload_emb = upload_emb / upload_emb.norm(dim=-1, keepdim=True)
 
     scores = {}
 
@@ -93,7 +98,8 @@ def compute_scores(upload_emb):
 
 @app.post("/check_structure")
 async def check_structure(file: UploadFile = File(...)):
-    img = Image.open(file.file).convert("RGB")
+    data = await file.read()
+    img = Image.open(BytesIO(data)).convert("RGB")
     img_t = preprocess(img).unsqueeze(0).to(device)
 
     with torch.no_grad():
@@ -112,7 +118,7 @@ async def check_structure(file: UploadFile = File(...)):
             "confusion": confusion
         }
 
-    # confidence levels
+    # Confidence levels
     if purity >= 3:
         confidence = "high"
     elif purity >= 1:
@@ -130,3 +136,9 @@ async def check_structure(file: UploadFile = File(...)):
         "purity": purity,
         "confusion": confusion
     }
+
+
+@app.get("/")
+def home():
+    return {"status": "ok", "message": "CLIP chart structure API running"}
+
