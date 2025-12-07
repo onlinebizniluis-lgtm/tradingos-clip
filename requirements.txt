@@ -2,7 +2,8 @@ fastapi==0.124.0
 uvicorn[standard]==0.38.0
 python-multipart==0.0.20
 Pillow==12.0.0
+numpy
 
-torch==2.5.1+cpu
-torchvision==0.20.0+cpu
+torch==2.7.1+cpu
+torchvision==0.22.1+cpu
 open-clip-torch==2.23.0
