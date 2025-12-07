@@ -5,6 +5,10 @@ from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 import open_clip
 
+# ------------------------------------------------------------
+# FastAPI Setup
+# ------------------------------------------------------------
+
 app = FastAPI()
 
 app.add_middleware(
@@ -17,14 +21,27 @@ app.add_middleware(
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-print("Loading CLIP model...")
+# ------------------------------------------------------------
+# Load CLIP: RN50 (low memory)
+# ------------------------------------------------------------
+
+print("Loading CLIP RN50 model...")
 model, preprocess, _ = open_clip.create_model_and_transforms(
-    "ViT-B-32",
+    "RN50",
     pretrained="openai"
 )
 model = model.to(device).eval()
+
+# put model in half precision for memory saving
+if device == "cuda":
+    model = model.half()
+
 print("Model loaded.")
 
+
+# ------------------------------------------------------------
+# Load embeddings from folders
+# ------------------------------------------------------------
 
 def load_folder_embeddings(folder):
     tensors = []
@@ -37,7 +54,12 @@ def load_folder_embeddings(folder):
 
         try:
             img = Image.open(path).convert("RGB")
-            img_t = preprocess(img).unsqueeze(0).to(device)
+            img_t = preprocess(img).unsqueeze(0)
+
+            if device == "cuda":
+                img_t = img_t.to(device).half()
+            else:
+                img_t = img_t.to(device)
 
             with torch.no_grad():
                 emb = model.encode_image(img_t)
@@ -45,8 +67,8 @@ def load_folder_embeddings(folder):
 
             tensors.append(emb)
 
-        except:
-            pass
+        except Exception as e:
+            print(f"Skipping {name}", e)
 
     if not tensors:
         return None
@@ -63,14 +85,19 @@ class_embeddings = {}
 for cat in categories:
     folder = os.path.join(base, cat)
     emb = load_folder_embeddings(folder)
+
     if emb is not None:
         class_embeddings[cat] = emb
+        print(f"Loaded {cat}: {emb.shape}")
+    else:
+        print(f"WARNING: No images for {cat}")
 
 print("Reference loading complete.")
 
 
-MIN_VALID_SCORE = 74.0  # derived from your dataset
-
+# ------------------------------------------------------------
+# Scoring Function
+# ------------------------------------------------------------
 
 def compute_scores(upload_emb):
     upload_emb /= upload_emb.norm(dim=-1, keepdim=True)
@@ -88,45 +115,30 @@ def compute_scores(upload_emb):
 
     purity = round(best_score - second_score, 2)
 
-    return scores, best_class, best_score, purity, ordered[1][0]
+    return {
+        "scores": scores,
+        "best": best_class,
+        "raw_score": best_score,
+        "purity": purity,
+        "confusion": second_class
+    }
 
+
+# ------------------------------------------------------------
+# API Endpoint
+# ------------------------------------------------------------
 
 @app.post("/check_structure")
 async def check_structure(file: UploadFile = File(...)):
     img = Image.open(file.file).convert("RGB")
-    img_t = preprocess(img).unsqueeze(0).to(device)
+
+    img_t = preprocess(img).unsqueeze(0)
+    if device == "cuda":
+        img_t = img_t.to(device).half()
+    else:
+        img_t = img_t.to(device)
 
     with torch.no_grad():
         emb = model.encode_image(img_t)
 
-    scores, best, best_score, purity, confusion = compute_scores(emb)
-
-    if best_score < MIN_VALID_SCORE:
-        return {
-            "valid_chart": False,
-            "reason": "Low similarity to known chart patterns",
-            "scores": scores,
-            "best": best,
-            "best_score": best_score,
-            "purity": purity,
-            "confusion": confusion
-        }
-
-    # confidence levels
-    if purity >= 3:
-        confidence = "high"
-    elif purity >= 1:
-        confidence = "medium"
-    else:
-        confidence = "low"
-
-    return {
-        "valid_chart": True,
-        "chart_type": best,
-        "confidence": confidence,
-        "scores": scores,
-        "best": best,
-        "best_score": best_score,
-        "purity": purity,
-        "confusion": confusion
-    }
+    return compute_scores(emb)
