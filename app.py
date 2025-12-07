@@ -17,10 +17,10 @@ app.add_middleware(
 
 device = "cpu"
 
-print("Loading small CLIP model...")
+print("Loading CLIP model...")
 model, preprocess, _ = open_clip.create_model_and_transforms(
-    "ViT-S-32",
-    pretrained="laion400m_e32"
+    "MobileCLIP2-S0",
+    pretrained="openai"
 )
 model.eval()
 model.to(device)
@@ -36,7 +36,7 @@ def load_folder_embeddings(folder: str):
     for name in os.listdir(folder):
         path = os.path.join(folder, name)
 
-        if not path.lower().endswith((".png", ".jpg", ".jpeg")):
+        if not name.lower().endswith((".png", ".jpg", ".jpeg")):
             continue
 
         try:
@@ -48,10 +48,8 @@ def load_folder_embeddings(folder: str):
                 emb = emb / emb.norm(dim=-1, keepdim=True)
 
             tensors.append(emb)
-
         except Exception as e:
-            print("Error:", e)
-            pass
+            print("Error processing:", e)
 
     if not tensors:
         return None
@@ -70,7 +68,7 @@ for cat in categories:
     if emb is not None:
         class_embeddings[cat] = emb
 
-print("Reference loading complete:", class_embeddings.keys())
+print("Loaded embeddings for:", list(class_embeddings.keys()))
 
 MIN_VALID_SCORE = 74.0
 
@@ -87,6 +85,7 @@ def compute_scores(upload_emb):
 
     best_class, best_score = ordered[0]
     second_class, second_score = ordered[1]
+
     purity = round(best_score - second_score, 2)
 
     return scores, best_class, best_score, purity, ordered[1][0]
@@ -106,7 +105,7 @@ async def check_structure(file: UploadFile = File(...)):
     if best_score < MIN_VALID_SCORE:
         return {
             "valid_chart": False,
-            "reason": "Low similarity to known chart patterns",
+            "reason": "Low similarity",
             "scores": scores,
             "best": best,
             "best_score": best_score,
@@ -126,8 +125,7 @@ async def check_structure(file: UploadFile = File(...)):
         "chart_type": best,
         "confidence": confidence,
         "scores": scores,
-        "best": best,
-        "best_score": best_score,
+        "%": best_score,
         "purity": purity,
         "confusion": confusion
     }
