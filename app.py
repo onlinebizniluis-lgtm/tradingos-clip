@@ -1,133 +1,104 @@
 import os
+os.environ["OPENCLIP_DISABLE_COCA"] = "1"
+
+import io
 import torch
+import open_clip
 from PIL import Image
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-import open_clip
 
-# ------------------------------------------------------------
-# FastAPI Setup
-# ------------------------------------------------------------
-
+# -----------------------------------
+# App setup
+# -----------------------------------
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Reduce memory use on Render
-torch.set_num_threads(1)
+# -----------------------------------
+# Load CLIP
+# -----------------------------------
 device = "cpu"
 
-
-# ------------------------------------------------------------
-# Load CLIP Model (cached)
-# ------------------------------------------------------------
-
-print("Loading CLIP...")
 model, preprocess, _ = open_clip.create_model_and_transforms(
     "ViT-B-32",
     pretrained="openai",
-    cache_dir="/opt/render/cache"
 )
-model = model.to(device).eval()
-print("CLIP loaded.")
+model = model.to(device)
+tokenizer = open_clip.get_tokenizer("ViT-B-32")
 
 
-# ------------------------------------------------------------
-# Load reference embeddings
-# ------------------------------------------------------------
-
-def load_folder_embeddings(folder):
-    tensors = []
-
-    for name in os.listdir(folder):
-        path = os.path.join(folder, name)
-
-        if not path.lower().endswith((".png", ".jpg", ".jpeg")):
-            continue
-
-        try:
-            img = Image.open(path).convert("RGB")
-            img_t = preprocess(img).unsqueeze(0).to(device)
-
-            with torch.no_grad():
-                emb = model.encode_image(img_t)
-                emb /= emb.norm(dim=-1, keepdim=True)
-
-            tensors.append(emb)
-
-        except Exception as e:
-            print(f"Skipping {name}", e)
-
-    if not tensors:
-        return None
-
-    return torch.cat(tensors, dim=0)
+# -----------------------------------
+# Inference: similarity to chart concepts
+# -----------------------------------
+concepts = [
+    "financial chart",
+    "candlestick chart",
+    "price action",
+    "stock chart",
+    "random unrelated photo"
+]
+text_tokens = tokenizer(concepts)
 
 
-print("Loading reference datasets...")
+def get_scores(image: Image.Image):
+    image_input = preprocess(image).unsqueeze(0).to(device)
+    text_input = text_tokens.to(device)
 
-base = "reference/market_structure"
-categories = ["uptrend", "downtrend", "consolidation"]
-class_embeddings = {}
+    with torch.no_grad(), torch.cuda.amp.autocast(enabled=False):
+        image_features = model.encode_image(image_input)
+        text_features = model.encode_text(text_input)
 
-for cat in categories:
-    folder = os.path.join(base, cat)
-    emb = load_folder_embeddings(folder)
+        image_features /= image_features.norm(dim=-1, keepdim=True)
+        text_features /= text_features.norm(dim=-1, keepdim=True)
 
-    if emb is not None:
-        class_embeddings[cat] = emb
-        print(f"Loaded {cat}: {emb.shape}")
-    else:
-        print(f"WARNING: No images for {cat}")
+        logits = (image_features @ text_features.T) * 100
+        probs = logits.softmax(dim=-1).cpu().numpy()[0]
 
-print("Reference loading complete.")
+    result = {}
+    for label, p in zip(concepts, probs):
+        result[label] = float(p)
+    return result
 
 
-# ------------------------------------------------------------
-# Scoring Function
-# ------------------------------------------------------------
+# -----------------------------------
+# Routes
+# -----------------------------------
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "CLIP engine ready"}
 
-def compute_scores(upload_emb):
-    upload_emb /= upload_emb.norm(dim=-1, keepdim=True)
 
-    scores = {}
+@app.post("/analyze")
+async def analyze(file: UploadFile = File(...)):
+    content = await file.read()
+    image = Image.open(io.BytesIO(content)).convert("RGB")
 
-    for cat, emb in class_embeddings.items():
-        score = (emb @ upload_emb.T).max().item()
-        scores[cat] = round(score * 100, 2)
+    scores = get_scores(image)
 
-    ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    # probability it's a chart
+    chart_score = (
+        scores["financial chart"]
+        + scores["candlestick chart"]
+        + scores["stock chart"]
+        + scores["price action"]
+    )
 
-    best_class, best_score = ordered[0]
-    second_class, second_score = ordered[1]
+    # random photo detection
+    random_score = scores["random unrelated photo"]
 
-    purity = round(best_score - second_score, 2)
+    # final logic
+    is_chart = chart_score > random_score
 
     return {
         "scores": scores,
-        "best": best_class,
-        "raw_score": best_score,
-        "purity": purity,
-        "confusion": second_class
+        "is_valid_chart": bool(is_chart),
+        "chart_confidence": float(chart_score),
+        "random_confidence": float(random_score),
     }
-
-
-# ------------------------------------------------------------
-# API Endpoint
-# ------------------------------------------------------------
-
-@app.post("/check_structure")
-async def check_structure(file: UploadFile = File(...)):
-    img = Image.open(file.file).convert("RGB")
-    img_t = preprocess(img).unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        emb = model.encode_image(img_t)
-
-    return compute_scores(emb)
-
