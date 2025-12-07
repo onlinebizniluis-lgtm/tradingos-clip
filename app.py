@@ -1,87 +1,90 @@
-import os
-os.environ["OPENCLIP_DISABLE_COCA"] = "1"
-os.environ["OPENCLIP_SKIP_CUDA_CHECK"] = "1"
-
 import io
+import gc
+import time
+from fastapi import FastAPI, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+from PIL import Image
 import torch
 import open_clip
-from PIL import Image
-from fastapi import FastAPI, File, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-
+import numpy as np
 
 app = FastAPI()
 
+# Allow frontend calls
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # set your domain later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-device = "cpu"
-
-model, preprocess, _ = open_clip.create_model_and_transforms(
-    "ViT-B-32",
-    pretrained="openai",
-)
-model = model.to(device)
-tokenizer = open_clip.get_tokenizer("ViT-B-32")
-
-
-concepts = [
-    "financial chart",
-    "candlestick chart",
-    "price action",
-    "stock chart",
-    "random unrelated photo"
+# ---------------------------
+# PHASE 1 MARKET STRUCTURE
+# ---------------------------
+MARKET_STRUCTURE_TEXT = [
+    "uptrend market structure",
+    "downtrend market structure",
+    "consolidation market structure"
 ]
 
-text_tokens = tokenizer(concepts)
+def load_model():
+    model, _, preprocess = open_clip.create_model_and_transforms(
+        "ViT-B-16",
+        pretrained="laion400m_e32",
+    )
+    model.eval()
+    return model, preprocess
 
 
-def get_scores(image):
-    image_input = preprocess(image).unsqueeze(0).to(device)
-    text_input = text_tokens.to(device)
+def preprocess_image(preprocess, img: Image.Image):
+    return preprocess(img).unsqueeze(0)
+
+
+@app.post("/predict")
+async def predict(file: UploadFile = File(...)):
+
+    model, preprocess = load_model()
+
+    # Image Load
+    image_bytes = await file.read()
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image_tensor = preprocess_image(preprocess, image)
+
+    # Encode text
+    tokenizer = open_clip.get_tokenizer("ViT-B-16")
+    tokens = tokenizer(MARKET_STRUCTURE_TEXT)
 
     with torch.no_grad():
-        image_features = model.encode_image(image_input)
-        text_features = model.encode_text(text_input)
+        img_embed = model.encode_image(image_tensor)
+        text_embed = model.encode_text(tokens)
 
-        image_features /= image_features.norm(dim=-1, keepdim=True)
-        text_features /= text_features.norm(dim=-1, keepdim=True)
+        # Normalize
+        img_embed = img_embed / img_embed.norm(dim=-1, keepdim=True)
+        text_embed = text_embed / text_embed.norm(dim=-1, keepdim=True)
 
-        logits = (image_features @ text_features.T) * 100
-        probs = logits.softmax(dim=-1).cpu().numpy()[0]
+        similarities = (img_embed @ text_embed.T).squeeze().tolist()
 
-    return {label: float(p) for label, p in zip(concepts, probs)}
+    del model
+    gc.collect()
+
+    time.sleep(2.0)  # dramatic analysis delay
+
+    best_index = int(np.argmax(similarities))
+
+    return {
+        "best_match": MARKET_STRUCTURE_TEXT[best_index],
+        "scores": [
+            {"structure": MARKET_STRUCTURE_TEXT[i], "score": float(similarities[i])}
+            for i in range(len(MARKET_STRUCTURE_TEXT))
+        ]
+    }
 
 
 @app.get("/")
-def root():
-    return {"status": "ok"}
-
-
-@app.post("/analyze")
-async def analyze(file: UploadFile = File(...)):
-    content = await file.read()
-    image = Image.open(io.BytesIO(content)).convert("RGB")
-
-    scores = get_scores(image)
-
-    chart_score = (
-        scores["financial chart"]
-        + scores["candlestick chart"]
-        + scores["stock chart"]
-        + scores["price action"]
-    )
-
-    random_score = scores["random unrelated photo"]
-
+def home():
     return {
-        "scores": scores,
-        "is_valid_chart": bool(chart_score > random_score),
-        "chart_confidence": float(chart_score),
-        "random_confidence": float(random_score),
+        "status": "active",
+        "phase": "Market Structure Only",
+        "structures": MARKET_STRUCTURE_TEXT
     }
