@@ -1,6 +1,6 @@
 fastapi
 uvicorn[standard]
+onnxruntime-cpu
+numpy
 pillow
 python-multipart
-open-clip-torch
-torch==2.9.1+cpu
